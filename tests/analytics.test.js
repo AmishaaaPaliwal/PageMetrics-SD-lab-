@@ -6,3 +6,5 @@ test('AND filtering with inclusive dates',()=>{const r=sampleData()[0];assert.eq
 test('KPI rate excludes outstanding and unknown loans',()=>{const rows=sampleData().slice(0,4);rows.forEach((r,i)=>r.returnStatus=['RETURNED_ON_TIME','RETURNED_LATE','NOT_RETURNED','UNKNOWN'][i]);assert.equal(calculate(rows).rate,50);assert.deepEqual(calculate([]),{total:0,readers:0,rate:null});});
 test('Monday grouping crosses year boundary',()=>{const r=sampleData()[0];r.checkoutDate='2026-01-01';assert.deepEqual(trend([r],'WEEKLY'),[['2025-12-29',1]]);});
 test('reject malformed dates, reversed ranges and broken quoting',()=>{assert.equal(validDate('2026-02-30'),false);assert.throws(()=>filterRecords([],{start:'2026-02-02',end:'2026-01-01'}));assert.throws(()=>validateCSV('"unclosed'));});
+
+test('multi-select uses OR within a field and AND across fields',()=>{const rows=sampleData();const c={start:'2026-01-01',end:'2026-12-31',subject:['Computer Science','Literature'],userSegment:['STUDENT']};const selected=filterRecords(rows,c);assert.ok(selected.length);assert.ok(selected.every(r=>c.subject.includes(r.subject)&&r.userSegment==='STUDENT'));});
