@@ -89,7 +89,7 @@ $('#auth-form').onsubmit = async event => {
       if (data.password !== data.confirmPassword) throw Error('The passwords do not match.');
       const result = await api('/api/register',data);
       $('#auth-password').value = $('#auth-confirm').value = '';
-      displayRecoveryKey(result.user.recoveryKey, async () => {
+      const continueRegistration = async () => {
         if (result.user.awaitingEmailVerification) {
           await showVerification(data);
         } else {
@@ -97,7 +97,9 @@ $('#auth-form').onsubmit = async event => {
           authMode();
           $('#auth-message').textContent = 'Account created. An administrator must approve your role before you can sign in.';
         }
-      });
+      };
+      if (result.user.recoveryKey) displayRecoveryKey(result.user.recoveryKey, continueRegistration);
+      else await continueRegistration();
     } else {
       const result = await api('/api/login',data);
       $('#auth-password').value = '';
@@ -168,7 +170,7 @@ async function showVerification(data){
  $('#forgot').hidden=true;
  verificationCredentials={email:data.email,password:data.password};
  $('#auth-password').value='';$('#auth-form').hidden=true;$('#auth-toggle').hidden=true;$('#otp-panel').hidden=false;
- $('#auth-title').textContent='Verify your email';$('#auth-description').textContent='Verify ownership of '+data.email+'.';
+ $('#auth-title').textContent='Verify your account';$('#auth-description').textContent='Enter the registration code for '+data.email+'.';
  $('#otp-code').value='';$('#otp-message').textContent='';await sendCode();
 }
 async function sendCode(){
@@ -211,12 +213,28 @@ $('#forgot').onclick = () => {
   hideAuthControls();
   const form = $('#recovery-form');
   form.reset();
+  $('#reset-secret').name = 'code';
+  form.elements.code.closest('label').firstChild.textContent = 'Reset code';
   form.elements.email.value = $('#auth-email').value;
   $('#reset-message').textContent = '';
   $('#auth-title').textContent = 'Reset your password';
-  $('#auth-description').textContent = 'Enter your saved recovery key. If you need a replacement, contact your workspace administrator.';
+  $('#auth-description').textContent = 'Request a reset code for your registered email address.';
   form.hidden = false;
   form.elements.email.focus();
+};
+$('#request-reset').onclick = async event => {
+  const button = event.currentTarget;
+  const form = $('#recovery-form');
+  if (!form.elements.email.reportValidity()) return;
+  button.disabled = true;
+  try {
+    const result = await api('/api/request-reset-code', {email: form.elements.email.value});
+    $('#reset-secret').name = result.useKey ? 'recoveryKey' : 'code';
+    $('#reset-secret').closest('label').firstChild.textContent = result.useKey ? 'Recovery key' : 'Reset code';
+    $('#reset-message').textContent = result.message;
+    $('#reset-secret').focus();
+  } catch (error) { $('#reset-message').textContent = error.message; }
+  finally { button.disabled = false; }
 };
 $('#reset-back').onclick = () => { $('#recovery-form').reset(); authMode(); };
 $('#recovery-form').onsubmit = async event => {
@@ -229,12 +247,14 @@ $('#recovery-form').onsubmit = async event => {
     if (data.password !== data.confirmPassword) throw Error('The passwords do not match.');
     const result = await api('/api/reset-password', data);
     form.reset();
-    displayRecoveryKey(result.recoveryKey, () => {
+    const finish = () => {
       authMode();
       $('#auth-email').value = data.email;
       $('#auth-password').value = '';
       $('#auth-message').textContent = 'Password updated. Sign in with your new password.';
-    });
+    };
+    if (result.recoveryKey) displayRecoveryKey(result.recoveryKey, finish);
+    else finish();
   } catch (error) {
     $('#reset-message').textContent = error.message;
   } finally {

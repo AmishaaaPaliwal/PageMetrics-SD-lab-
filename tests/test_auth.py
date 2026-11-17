@@ -17,7 +17,7 @@ class FakeSocket:
 
 class AuthTests(unittest.TestCase):
     def setUp(self):
-        self.domain_patch=patch.dict(server.os.environ,{'PAGEMETRICS_EMAIL_DOMAINS':'example.edu','PAGEMETRICS_REQUIRE_OTP':'1'})
+        self.domain_patch=patch.dict(server.os.environ,{'PAGEMETRICS_EMAIL_DOMAINS':'example.edu','PAGEMETRICS_OTP_DELIVERY':'gmail','PAGEMETRICS_REQUIRE_OTP':'1'})
         self.domain_patch.start()
         self.mailbox={}
         self.mail_patch=patch('server.send_verification_code',side_effect=lambda email,code:self.mailbox.update({email:code}))
@@ -42,6 +42,32 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(server.session(token)['role'], 'librarian')
         with self.assertRaisesRegex(server.APIError, "session has expired"):
             server.session(token)
+
+    def test_terminal_registration_and_reset(self):
+        data = self.data('librarian')
+        with patch.dict(server.os.environ, {'PAGEMETRICS_OTP_DELIVERY':'terminal'}), patch('builtins.print') as output:
+            account = server.register(data)
+            server.request_email_code(data)
+            signup = output.call_args.args[0].split()[-1]
+            server.verify_email_code({**data, 'code':signup})
+            server.review_user(self.admin, {'id':account['id'], 'action':'approve', 'identityVerified':True})
+            token, _, user = server.login(data)
+            self.assertFalse(user['email_verified'])
+            response = server.request_reset_code(data)
+            code = output.call_args.args[0].split()[-1]
+            self.assertNotIn(code, str(response))
+            server.request_reset_code(data)
+            self.assertEqual(output.call_count, 2)
+            reset = dict(email=data['email'], password='replacement-password', confirmPassword='replacement-password', code=code)
+            server.reset_password(reset)
+            with self.assertRaises(server.APIError):
+                server.reset_password(reset)
+            with self.assertRaises(server.APIError):
+                server.session(token)
+            self.assertEqual(server.login(reset)[2]['id'], account['id'])
+            self.assertFalse(self.mailbox)
+        with self.assertRaises(server.APIError):
+            server.login(reset)
 
     def test_recovery_rotates_key_and_revokes_sessions(self):
         data = self.data('librarian')

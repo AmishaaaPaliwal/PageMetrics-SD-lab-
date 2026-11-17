@@ -14,13 +14,13 @@ python3 server.py --create-admin
 
 This one-time setup asks for your name, @lnmiit.ac.in email, and a password of 12–128 characters. Password typing is hidden in Terminal. It creates the first library administrator; there is no preset password. If it says an active administrator already exists, skip setup and use that account.
 
-For a local demo, run `python3 server.py`. OTP is disabled by default. New and existing pending staff accounts still require administrator approval. To enable email verification again, use the Gmail launcher below:
+For a local demo, run `python3 server.py`. Registration and password-reset codes appear in the terminal running the server. Both expire after ten minutes. Terminal codes are for demonstrations on a trusted local machine. New and existing pending staff accounts still require administrator approval. To enable email verification again, use the Gmail launcher below:
 
 ```sh
 python3 start_with_gmail.py
 ```
 
-Open **http://127.0.0.1:5173** (or **http://localhost:5173**) and sign in. Keep Terminal open while using the site. Press **Control+C** in Terminal to stop it. Next time, run `python3 start_with_gmail.py` again. If SMTP settings are already exported in the environment, `python3 server.py` also works. Python 3.10+ is required; there are no Python packages to install. If Node.js is available, `npm run create-admin` and `npm start` are equivalent shortcuts.
+Open **http://127.0.0.1:5173** (or **http://localhost:5173**) and sign in. Keep Terminal open while using the site. Press **Control+C** in Terminal to stop it. Run `python3 server.py` for terminal codes or `python3 start_with_gmail.py` for email verification. Python 3.10+ is required; there are no Python packages to install. If Node.js is available, `npm run create-admin` and `npm start` are equivalent shortcuts.
 
 If port 5173 is occupied:
 
@@ -126,7 +126,9 @@ The tests mock SMTP and do not send emails. Actual delivery still needs the user
 
 ## Forgot password
 
-Save the private recovery key shown at registration. Choose **Forgot password?** on the sign-in screen and enter your email, recovery key, and new password twice. Save the replacement key after each reset. A successful reset signs out prior sessions and preserves the account’s role and approval status.
+In the default terminal demo, select **Forgot password?**, enter the registered address and click **Request reset code**. Copy the six-digit code from the server terminal and enter the new password twice.
+
+In Gmail mode, save the private recovery key shown at registration. Choose **Forgot password?** on the sign-in screen and enter your email, recovery key, and new password twice. Save the replacement key after each reset. A successful reset signs out prior sessions and preserves the account’s role and approval status.
 
 For an existing account without a key, the trusted local operator can issue a replacement from the project directory containing that account’s database:
 

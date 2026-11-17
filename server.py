@@ -66,6 +66,10 @@ def initialize():
             expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL, sent_at INTEGER NOT NULL,
             window_start INTEGER NOT NULL, send_count INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS reset_codes (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id), code_hash TEXT NOT NULL,
+            issued INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE IF NOT EXISTS password_recovery (
             user_id INTEGER PRIMARY KEY REFERENCES users(id), digest TEXT NOT NULL
         );
@@ -91,6 +95,8 @@ def initialize():
         columns={r['name'] for r in db.execute('PRAGMA table_info(users)')}
         if 'email_verified' not in columns:
             db.execute('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0')
+        if 'demo_verified' not in columns:
+            db.execute('ALTER TABLE users ADD COLUMN demo_verified INTEGER NOT NULL DEFAULT 0')
         # Retire legacy student accounts without deleting their history.
         db.execute("UPDATE users SET status='inactive' WHERE role='student'")
         db.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE role='student')")
@@ -147,11 +153,15 @@ def credentials(data):
     return email, password
 
 def requires_email_code():
-    return os.environ.get('PAGEMETRICS_REQUIRE_OTP', '0') == '1'
+    return os.environ.get('PAGEMETRICS_REQUIRE_OTP', '1') == '1'
+
+
+def terminal_demo():
+    return os.environ.get('PAGEMETRICS_OTP_DELIVERY', 'terminal') == 'terminal'
 
 
 def awaiting_email(row):
-    return requires_email_code() and not row['email_verified']
+    return requires_email_code() and not (row['email_verified'] or (terminal_demo() and row['demo_verified']))
 
 
 def public_user(row):
@@ -167,25 +177,56 @@ def issue_recovery_key(db, user_id):
     return key
 
 
+def request_reset_code(data):
+    if not terminal_demo():
+        return {'message': 'Enter your saved recovery key.', 'useKey': True}
+    email = clean_text(data, 'email', 254).lower()
+    now = int(time.time())
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        user = db.execute('SELECT id FROM users WHERE email=?', (email,)).fetchone()
+        if user:
+            previous = db.execute('SELECT issued FROM reset_codes WHERE user_id=?', (user['id'],)).fetchone()
+            if not previous or now - previous['issued'] >= 60:
+                code = f'{secrets.randbelow(1000000):06d}'
+                db.execute('INSERT OR REPLACE INTO reset_codes VALUES(?,?,?,0)',
+                           (user['id'], password_hash(code), now))
+                print(f'[DEMO] Password reset for {email}: {code}', flush=True)
+    return {'message': 'For a registered address, check the server terminal for the reset code. Codes expire in 10 minutes. Request another after 60 seconds.'}
+
+
 def reset_password(data):
     email, password = credentials(data)
     if password != data.get('confirmPassword'):
         raise APIError('The passwords do not match.')
-    key = clean_text(data, 'recoveryKey', 128)
-    digest = hashlib.sha256(key.encode()).hexdigest()
+
     with connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        user = db.execute("""SELECT users.*, password_recovery.digest FROM users
+        if 'code' in data:
+            code = clean_text(data, 'code', 6)
+            user = db.execute("""SELECT users.*, r.code_hash, r.issued, r.attempts FROM users
+                JOIN reset_codes r ON r.user_id=users.id WHERE email=?""", (email,)).fetchone()
+            if not terminal_demo() or not user or user['issued'] + 600 <= time.time() or user['attempts'] >= 5:
+                raise APIError('Invalid or expired reset code.')
+            if not password_matches(code, user['code_hash']):
+                db.execute('UPDATE reset_codes SET attempts=attempts+1 WHERE user_id=?', (user['id'],))
+                db.commit()
+                raise APIError('Invalid or expired reset code.')
+        else:
+            key = clean_text(data, 'recoveryKey', 128)
+            digest = hashlib.sha256(key.encode()).hexdigest()
+            user = db.execute("""SELECT users.*, password_recovery.digest FROM users
             JOIN password_recovery ON password_recovery.user_id=users.id WHERE email=?""", (email,)).fetchone()
-        if not user or not hmac.compare_digest(digest, user['digest']):
-            raise APIError('The email or recovery key is incorrect.')
+            if not user or not hmac.compare_digest(digest, user['digest']):
+                raise APIError('The email or recovery key is incorrect.')
         db.execute('UPDATE users SET password_hash=? WHERE id=?', (password_hash(password), user['id']))
         db.execute('DELETE FROM sessions WHERE user_id=?', (user['id'],))
         db.execute('DELETE FROM login_attempts WHERE key=?', ('account:' + email,))
         db.execute('DELETE FROM email_verifications WHERE user_id=?', (user['id'],))
+        db.execute('DELETE FROM reset_codes WHERE user_id=?', (user['id'],))
         replacement = issue_recovery_key(db, user['id'])
         audit(db, user, 'PASSWORD_RESET')
-    return {'recoveryKey': replacement}
+    return {} if 'code' in data else {'recoveryKey': replacement}
 
 
 def register(data, bootstrap=False):
@@ -215,7 +256,7 @@ def register(data, bootstrap=False):
             raise APIError('An account with that email already exists.', 409)
         if bootstrap: db.execute('UPDATE users SET email_verified=1 WHERE id=?',(cursor.lastrowid,))
         result = public_user(db.execute('SELECT * FROM users WHERE id=?', (cursor.lastrowid,)).fetchone())
-        if not bootstrap:
+        if not bootstrap and not terminal_demo():
             result['recoveryKey'] = issue_recovery_key(db, cursor.lastrowid)
         audit(db,result,'ACCOUNT_CREATED',details={'status':status})
         return result
@@ -280,13 +321,17 @@ def request_email_code(data, remote='local'):
         if limit and limit['reset_at']>now and limit['failures']>=20:
             raise APIError('Too many verification emails requested. Try again later.',429)
         code=f'{secrets.randbelow(1000000):06d}'
-        try: send_verification_code(user['email'],code)
+        try:
+            if terminal_demo():
+                print(f"[DEMO] Registration for {user['email']}: {code}", flush=True)
+            else:
+                send_verification_code(user['email'],code)
         except DeliveryError as error: raise APIError(str(error),503,'EMAIL_DELIVERY_FAILED') from None
         db.execute('INSERT INTO email_verifications VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET code_hash=excluded.code_hash,expires_at=excluded.expires_at,attempts=0,sent_at=excluded.sent_at,window_start=excluded.window_start,send_count=excluded.send_count',
-                   (user['id'],password_hash(code),now+600,0,now,start,count+1))
+                   (user['id'],password_hash(('terminal:' if terminal_demo() else '') + code),now+600,0,now,start,count+1))
         db.execute('INSERT INTO login_attempts VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET failures=CASE WHEN reset_at<=? THEN 1 ELSE failures+1 END,reset_at=CASE WHEN reset_at<=? THEN ? ELSE reset_at END',(key,now+3600,now,now,now+3600))
         audit(db,user,'EMAIL_CODE_SENT')
-    return {'message':'Verification code sent. It expires in 10 minutes.','resendAfter':60}
+    return {'message':('Check the server terminal for your registration code.' if terminal_demo() else 'Verification code sent.') + ' It expires in 10 minutes.','resendAfter':60}
 
 def verify_email_code(data, remote='local'):
     user=authenticate(data,remote)
@@ -299,15 +344,16 @@ def verify_email_code(data, remote='local'):
         if user['email_verified'] or not record or record['expires_at']<=now:
             raise APIError('The code has expired or has already been used. Request a new code.')
         if record['attempts']>=5: raise APIError('Too many incorrect codes. Request a new code.',429)
-        if not password_matches(code,record['code_hash']):
+        if not password_matches(('terminal:' if terminal_demo() else '') + code,record['code_hash']):
             db.execute('UPDATE email_verifications SET attempts=attempts+1 WHERE user_id=?',(user['id'],))
             audit(db,user,'EMAIL_VERIFICATION','FAILED'); db.commit()
             raise APIError('The verification code is incorrect.')
-        db.execute('UPDATE users SET email_verified=1 WHERE id=?',(user['id'],))
+        field = 'demo_verified' if terminal_demo() else 'email_verified'
+        db.execute(f'UPDATE users SET {field}=1 WHERE id=?',(user['id'],))
         # Retain only rate-limit metadata until expiry; remove usable code material.
         db.execute("UPDATE email_verifications SET code_hash='',expires_at=0 WHERE user_id=?",(user['id'],))
         audit(db,user,'EMAIL_VERIFICATION')
-    return {'message':'Email verified. Your staff role still requires administrator approval.' if user['status']=='pending' else 'Email verified. You can now sign in.'}
+    return {'message':'Code verified. Your staff role still requires administrator approval.' if user['status']=='pending' else 'Email verified. You can now sign in.'}
 
 
 def session(token):
@@ -544,6 +590,8 @@ class Handler(SimpleHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict): raise APIError('Invalid request body.')
             path = urlparse(self.path).path
+            if path == '/api/request-reset-code':
+                self.send_json(request_reset_code(data)); return
             if path == '/api/reset-password':
                 self.send_json(reset_password(data)); return
             if path == '/api/register':
