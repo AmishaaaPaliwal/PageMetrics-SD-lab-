@@ -14,7 +14,7 @@ python3 server.py --create-admin
 
 This one-time setup asks for your name, @lnmiit.ac.in email, and a password of 12–128 characters. Password typing is hidden in Terminal. It creates the first library administrator; there is no preset password. If it says an active administrator already exists, skip setup and use that account.
 
-Then start the website with Gmail OTP delivery configured (see the Gmail setup below):
+For a local demo, run `python3 server.py`. OTP is disabled by default. New and existing pending staff accounts still require administrator approval. To enable email verification again, use the Gmail launcher below:
 
 ```sh
 python3 start_with_gmail.py
@@ -90,7 +90,7 @@ SQLite data lives at `data/pagemetrics.sqlite3`, inside this project and exclude
 - `dist/app.js`: dashboard, reports, import/history views and navigation.
 - `tests/`: API, permission, import, session, audit and analytics tests.
 
-The current schema uses a validated JSON circulation snapshot rather than separate normalized resource/reader/subject tables. The application implements the main workflows and explicit state history, but does not reproduce every UML class as a code class. No institutional SSO, password-reset service, complete catalogue, or production availability/load guarantee is included. These remain documented integration/modeling limitations, not claimed completed features.
+The current schema uses a validated JSON circulation snapshot rather than separate normalized resource/reader/subject tables. The application implements the main workflows and explicit state history, but does not reproduce every UML class as a code class. No institutional SSO, complete catalogue, or production availability/load guarantee is included. These remain documented integration/modeling limitations, not claimed completed features.
 
 The published Sites URL is the old static prototype. All current work is local to this folder. A production deployment needs Python-compatible hosting, persistent storage, HTTPS and `PAGEMETRICS_SECURE_COOKIES=1`. Do not publish only `dist/` as an authentication-enabled application.
 
@@ -123,3 +123,15 @@ OTP controls: 10-minute expiry, single use, salted scrypt storage, five incorrec
 Existing accounts gain `email_verified=0` on upgrade and must verify before logging in; old unverified sessions are denied. The first administrator created through the trusted local `--create-admin` terminal command is deliberately marked verified so it can bootstrap the approval workflow. There is no browser-accessible bootstrap exception. Administrative role approval is blocked until an applicant's email is verified.
 
 The tests mock SMTP and do not send emails. Actual delivery still needs the user's sender configuration and a successful inbox test; automated tests are not evidence of live Gmail delivery. These codes verify registration/email ownership, not a second factor on every login.
+
+## Forgot password
+
+Save the private recovery key shown at registration. Choose **Forgot password?** on the sign-in screen and enter your email, recovery key, and new password twice. Save the replacement key after each reset. A successful reset signs out prior sessions and preserves the account’s role and approval status.
+
+For an existing account without a key, the trusted local operator can issue a replacement from the project directory containing that account’s database:
+
+```sh
+python3 server.py --issue-recovery-key user@lnmiit.ac.in
+```
+
+Issuing a replacement invalidates the previous key. Verify the account holder before sharing a key privately.

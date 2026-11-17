@@ -66,6 +66,9 @@ def initialize():
             expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL, sent_at INTEGER NOT NULL,
             window_start INTEGER NOT NULL, send_count INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS password_recovery (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id), digest TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS sessions (
             token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
             csrf TEXT NOT NULL, expires_at INTEGER NOT NULL
@@ -143,10 +146,47 @@ def credentials(data):
         raise APIError('Use a password between 12 and 128 characters.')
     return email, password
 
+def requires_email_code():
+    return os.environ.get('PAGEMETRICS_REQUIRE_OTP', '0') == '1'
+
+
+def awaiting_email(row):
+    return requires_email_code() and not row['email_verified']
+
+
 def public_user(row):
     result = {k: row[k] for k in ('id', 'name', 'email', 'role', 'subject', 'status', 'email_verified')}
+    result['awaitingEmailVerification'] = awaiting_email(row)
     result['permissions'] = sorted(PERMISSIONS.get(row['role'], set()))
     return result
+
+def issue_recovery_key(db, user_id):
+    key = secrets.token_urlsafe(24)
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    db.execute('INSERT OR REPLACE INTO password_recovery VALUES(?,?)', (user_id, digest))
+    return key
+
+
+def reset_password(data):
+    email, password = credentials(data)
+    if password != data.get('confirmPassword'):
+        raise APIError('The passwords do not match.')
+    key = clean_text(data, 'recoveryKey', 128)
+    digest = hashlib.sha256(key.encode()).hexdigest()
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        user = db.execute("""SELECT users.*, password_recovery.digest FROM users
+            JOIN password_recovery ON password_recovery.user_id=users.id WHERE email=?""", (email,)).fetchone()
+        if not user or not hmac.compare_digest(digest, user['digest']):
+            raise APIError('The email or recovery key is incorrect.')
+        db.execute('UPDATE users SET password_hash=? WHERE id=?', (password_hash(password), user['id']))
+        db.execute('DELETE FROM sessions WHERE user_id=?', (user['id'],))
+        db.execute('DELETE FROM login_attempts WHERE key=?', ('account:' + email,))
+        db.execute('DELETE FROM email_verifications WHERE user_id=?', (user['id'],))
+        replacement = issue_recovery_key(db, user['id'])
+        audit(db, user, 'PASSWORD_RESET')
+    return {'recoveryKey': replacement}
+
 
 def register(data, bootstrap=False):
     email, password = credentials(data)
@@ -175,6 +215,8 @@ def register(data, bootstrap=False):
             raise APIError('An account with that email already exists.', 409)
         if bootstrap: db.execute('UPDATE users SET email_verified=1 WHERE id=?',(cursor.lastrowid,))
         result = public_user(db.execute('SELECT * FROM users WHERE id=?', (cursor.lastrowid,)).fetchone())
+        if not bootstrap:
+            result['recoveryKey'] = issue_recovery_key(db, cursor.lastrowid)
         audit(db,result,'ACCOUNT_CREATED',details={'status':status})
         return result
 
@@ -206,7 +248,7 @@ def authenticate(data, remote='local'):
 
 def login(data, remote='local'):
     user=authenticate(data,remote)
-    if not user['email_verified']:
+    if awaiting_email(user):
         raise APIError('Verify your institutional email before signing in.',403,'EMAIL_VERIFICATION_REQUIRED')
     if user['status']!='active':
         with connect() as db: audit(db,user,'LOGIN','DENIED')
@@ -274,7 +316,7 @@ def session(token):
     with connect() as db:
         row = db.execute('SELECT u.*, s.csrf FROM sessions s JOIN users u ON u.id=s.user_id WHERE token_hash=? AND expires_at>? AND u.status=\'active\'',
                          (hashlib.sha256(token.encode()).hexdigest(), int(time.time()))).fetchone()
-    if not row or row['role'] not in ROLES or not row['email_verified']:
+    if not row or row['role'] not in ROLES or awaiting_email(row):
         raise APIError('Your session has expired. Please sign in again.', 401)
     return row
 
@@ -419,7 +461,7 @@ def review_user(user, data):
         row = db.execute('SELECT * FROM users WHERE id=?', (target,)).fetchone()
         if not row or row['status'] != 'pending' or row['role'] not in ROLES:
             raise APIError('This account is no longer awaiting review.', 409)
-        if action=='approve' and not row['email_verified']: raise APIError('The applicant must verify their email before approval.')
+        if action=='approve' and awaiting_email(row): raise APIError('The applicant must verify their email before approval.')
         db.execute('UPDATE users SET status=? WHERE id=?', ('active' if action == 'approve' else 'rejected', target))
         audit(db,user,'ACCOUNT_REVIEW',details={'targetId':target,'action':action,'identityVerified':action=='approve'})
     return {'message': 'Account approved.' if action == 'approve' else 'Account rejected.'}
@@ -502,9 +544,15 @@ class Handler(SimpleHTTPRequestHandler):
             data = json.loads(self.rfile.read(length))
             if not isinstance(data, dict): raise APIError('Invalid request body.')
             path = urlparse(self.path).path
+            if path == '/api/reset-password':
+                self.send_json(reset_password(data)); return
             if path == '/api/register':
+                if 'confirmPassword' in data and data['confirmPassword'] != data.get('password'):
+                    raise APIError('The passwords do not match.')
                 self.send_json({'user': register(data)}, 201)
                 return
+            if path in ('/api/request-email-code', '/api/verify-email') and not requires_email_code():
+                raise APIError('Email verification is disabled for this workspace.', 403)
             if path == '/api/request-email-code':
                 self.send_json(request_email_code(data,self.client_address[0])); return
             if path == '/api/verify-email':
@@ -541,11 +589,20 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PageMetrics local server')
+    parser.add_argument('--issue-recovery-key', metavar='EMAIL', help='Issue a replacement recovery key from the trusted local terminal')
     parser.add_argument('--create-admin', action='store_true', help='Create the first administrator using terminal prompts')
     parser.add_argument('--port', type=int, default=5173)
     args = parser.parse_args()
     initialize()
-    if args.create_admin:
+    if args.issue_recovery_key:
+        with connect() as db:
+            user = db.execute('SELECT * FROM users WHERE email=?', (args.issue_recovery_key.strip().lower(),)).fetchone()
+            if not user:
+                raise SystemExit('Account not found in this project database.')
+            key = issue_recovery_key(db, user['id'])
+            audit(db, user, 'LOCAL_RECOVERY_KEY_ISSUED')
+        print('Save this private recovery key:', key)
+    elif args.create_admin:
         try:
             name = input('Administrator name: ')
             email = input('Administrator email: ')

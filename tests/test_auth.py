@@ -17,7 +17,7 @@ class FakeSocket:
 
 class AuthTests(unittest.TestCase):
     def setUp(self):
-        self.domain_patch=patch.dict(server.os.environ,{'PAGEMETRICS_EMAIL_DOMAINS':'example.edu'})
+        self.domain_patch=patch.dict(server.os.environ,{'PAGEMETRICS_EMAIL_DOMAINS':'example.edu','PAGEMETRICS_REQUIRE_OTP':'1'})
         self.domain_patch.start()
         self.mailbox={}
         self.mail_patch=patch('server.send_verification_code',side_effect=lambda email,code:self.mailbox.update({email:code}))
@@ -29,6 +29,38 @@ class AuthTests(unittest.TestCase):
         server.DB_PATH = Path(self.temp.name) / 'test.sqlite3'
         server.initialize()
         self.admin = server.register(self.data('administrator'), bootstrap=True)
+    def test_demo_login_requires_approval_but_skips_email(self):
+        with patch.dict(server.os.environ, {'PAGEMETRICS_REQUIRE_OTP': '0'}):
+            data = self.data('librarian')
+            account = server.register(data)
+            self.assertFalse(account['awaitingEmailVerification'])
+            with self.assertRaisesRegex(server.APIError, 'awaiting approval'):
+                server.login(data)
+            server.review_user(self.admin, {'id': account['id'], 'action': 'approve', 'identityVerified': True})
+            token, _, user = server.login(data)
+            self.assertFalse(user['email_verified'])
+            self.assertEqual(server.session(token)['role'], 'librarian')
+        with self.assertRaisesRegex(server.APIError, "session has expired"):
+            server.session(token)
+
+    def test_recovery_rotates_key_and_revokes_sessions(self):
+        data = self.data('librarian')
+        account = server.register(data)
+        self.verify(data)
+        server.review_user(self.admin, {'id':account['id'], 'action':'approve', 'identityVerified':True})
+        token, _, _ = server.login(data)
+        payload = dict(email=data['email'], recoveryKey=account['recoveryKey'],
+                       password='changed-password-123', confirmPassword='changed-password-123')
+        for change in [{'recoveryKey':'invalid'}, {'email':'other@example.edu'}, {'confirmPassword':'mismatch'}]:
+            with self.assertRaises(server.APIError):
+                server.reset_password({**payload, **change})
+        result = server.reset_password(payload)
+        self.assertNotEqual(result['recoveryKey'], payload['recoveryKey'])
+        for action in [lambda: server.session(token), lambda: server.reset_password(payload), lambda: server.login(data)]:
+            with self.assertRaises(server.APIError):
+                action()
+        self.assertEqual(server.login(payload)[2]['id'], account['id'])
+
     def tearDown(self):
         self.domain_patch.stop()
         self.mail_patch.stop()

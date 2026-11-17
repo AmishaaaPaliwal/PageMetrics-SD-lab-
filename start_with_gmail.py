@@ -7,6 +7,7 @@ import sys
 
 def main():
     environment = os.environ.copy()
+    environment['PAGEMETRICS_REQUIRE_OTP'] = '1'
     sender = environment.get('PAGEMETRICS_GMAIL_ADDRESS', '').strip()
     password = environment.get('PAGEMETRICS_GMAIL_APP_PASSWORD', '')
     if not sender:

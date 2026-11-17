@@ -31,6 +31,12 @@ function showAuth(message = '') {
 let verificationCredentials=null;
 let registering = location.pathname === '/register';
 function authMode() {
+  $('#confirm-label').hidden = !registering;
+  $('#auth-confirm').disabled = !registering;
+  $('#auth-confirm').required = registering;
+  $('#auth-confirm').value = '';
+  $('#forgot').hidden = registering;
+  $('#recovery-form').hidden = true;
   verificationCredentials=null;$('#otp-panel').hidden=true;$('#auth-form').hidden=false;$('#auth-toggle').hidden=false;
   $('#auth-title').textContent = registering ? 'Create your account' : 'Welcome back';
   $('#auth-description').textContent = registering ? 'Use your @lnmiit.ac.in email and choose your staff role.' : 'Sign in to your library workspace.';
@@ -80,8 +86,18 @@ $('#auth-form').onsubmit = async event => {
   try {
     const data = Object.fromEntries(new FormData(event.target));
     if (registering) {
+      if (data.password !== data.confirmPassword) throw Error('The passwords do not match.');
       const result = await api('/api/register',data);
-      await showVerification(data);
+      $('#auth-password').value = $('#auth-confirm').value = '';
+      displayRecoveryKey(result.user.recoveryKey, async () => {
+        if (result.user.awaitingEmailVerification) {
+          await showVerification(data);
+        } else {
+          registering = false;
+          authMode();
+          $('#auth-message').textContent = 'Account created. An administrator must approve your role before you can sign in.';
+        }
+      });
     } else {
       const result = await api('/api/login',data);
       $('#auth-password').value = '';
@@ -122,8 +138,8 @@ export async function renderAccounts() {
       status.className = 'tag';
       status.textContent = user.status;
       actions.append(status);
-      if(user.status==='pending'&&!user.email_verified){const note=document.createElement('small');note.textContent='Awaiting email verification';actions.append(note);}
-      if (user.status === 'pending' && user.email_verified) {
+      if(user.status==='pending'&&user.awaitingEmailVerification){const note=document.createElement('small');note.textContent='Awaiting email verification';actions.append(note);}
+      if (user.status === 'pending' && !user.awaitingEmailVerification) {
         const verification=document.createElement('label');
         verification.className='approval-check';
         const checkbox=document.createElement('input');checkbox.type='checkbox';
@@ -149,6 +165,7 @@ export async function renderAccounts() {
 }
 
 async function showVerification(data){
+ $('#forgot').hidden=true;
  verificationCredentials={email:data.email,password:data.password};
  $('#auth-password').value='';$('#auth-form').hidden=true;$('#auth-toggle').hidden=true;$('#otp-panel').hidden=false;
  $('#auth-title').textContent='Verify your email';$('#auth-description').textContent='Verify ownership of '+data.email+'.';
@@ -169,3 +186,58 @@ $('#otp-form').onsubmit=async event=>{
 };
 $('#otp-resend').onclick=sendCode;
 $('#otp-back').onclick=()=>{registering=false;authMode();};
+
+function hideAuthControls() {
+  for (const selector of ['#auth-form', '#forgot', '#auth-toggle', '#recovery-form']) {
+    $(selector).hidden = true;
+  }
+}
+
+function displayRecoveryKey(key, next) {
+  hideAuthControls();
+  $('#auth-title').textContent = 'Save your recovery key';
+  $('#auth-description').textContent = '';
+  $('#new-key').textContent = key;
+  $('#save-key').hidden = false;
+  $('#key-saved').onclick = () => {
+    $('#new-key').textContent = '';
+    $('#save-key').hidden = true;
+    $('#key-saved').onclick = null;
+    next();
+  };
+}
+
+$('#forgot').onclick = () => {
+  hideAuthControls();
+  const form = $('#recovery-form');
+  form.reset();
+  form.elements.email.value = $('#auth-email').value;
+  $('#reset-message').textContent = '';
+  $('#auth-title').textContent = 'Reset your password';
+  $('#auth-description').textContent = 'Enter your saved recovery key. If you need a replacement, contact your workspace administrator.';
+  form.hidden = false;
+  form.elements.email.focus();
+};
+$('#reset-back').onclick = () => { $('#recovery-form').reset(); authMode(); };
+$('#recovery-form').onsubmit = async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('.primary');
+  button.disabled = true;
+  try {
+    const data = Object.fromEntries(new FormData(form));
+    if (data.password !== data.confirmPassword) throw Error('The passwords do not match.');
+    const result = await api('/api/reset-password', data);
+    form.reset();
+    displayRecoveryKey(result.recoveryKey, () => {
+      authMode();
+      $('#auth-email').value = data.email;
+      $('#auth-password').value = '';
+      $('#auth-message').textContent = 'Password updated. Sign in with your new password.';
+    });
+  } catch (error) {
+    $('#reset-message').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+};
