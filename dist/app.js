@@ -1,3 +1,4 @@
+import {refreshDropdowns} from './filter-dropdowns.js';
 import {api,account,can,initializeAuth,renderAccounts} from './auth.js';
 import {fields,sampleData,validateCSV,filterRecords,calculate,trend,group,csv} from './analytics.js';
 const $=s=>document.querySelector(s),esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));let records=[],imported=false,current=[],criteria;const colors=['#3e7c5b','#91ad77','#c3cf9f','#d9c89e','#94b4b0'];
@@ -15,7 +16,7 @@ function render(){const k=calculate(current);$('#total').textContent=k.total.toL
 // Rank resource checkout counts and display each title’s share of filtered circulation.
 function renderTable(){const counts=group(current,'resourceId'),rows=Object.entries(counts).sort((a,b)=>$('#rank').value==='most'?b[1]-a[1]:a[1]-b[1]);$('#resource-rows').innerHTML=rows.map(([id,n])=>{const r=current.find(r=>r.resourceId===id);return `<tr><td>${esc(r.title)}</td><td>${esc(r.subject)}</td><td><span class="tag">${esc(r.format)}</span></td><td><b>${n}</b></td><td>${(n/current.length*100).toFixed(1)}%</td></tr>`;}).join('')||'<tr><td colspan="5">No matching resources</td></tr>';}
 // Read form selections; getAll preserves multiple selected values for comparison.
-function readCriteria(form){const data=new FormData(form),c=Object.fromEntries(data);for(const key of ['subject','resourceId','userSegment','format','deweyClass'])c[key]=data.getAll(key).filter(Boolean);return c;}
+function readCriteria(form){refreshDropdowns(form);const data=new FormData(form),c=Object.fromEntries(data);for(const key of ['subject','resourceId','userSegment','format','deweyClass'])c[key]=data.getAll(key).filter(Boolean);return c;}
 // Expose loading, empty and error feedback while keeping the interface state explicit.
 function dashboardState(state){$('#analytics-page').dataset.state=state;$('#dashboard-state').textContent=({LOADING:'Loading library data…',UPDATING:'Updating filters…',EMPTY:'No matching records.',ERROR:'Unable to update. Previous results are retained.'})[state]||'';}
 // Validate selected filters, update the current dataset and redraw the dashboard.

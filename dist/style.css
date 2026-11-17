@@ -366,3 +366,19 @@ select[multiple]{min-height:85px}
 #report-filters>.primary{margin-top:16px}
 /* Style #dashboard-state. */
 #dashboard-state{font-size:12px;color:var(--muted)}
+
+/* Compact checkbox dropdowns retain the existing form values and support keyboard navigation. */
+.dropdown-field{min-width:0}
+.dropdown-caption{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-bottom:8px}
+.filter-dropdown{position:relative}
+.filter-dropdown summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;padding:11px 13px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--ink);font-size:13px;cursor:pointer}
+.filter-dropdown summary::-webkit-details-marker{display:none}
+.filter-dropdown summary::after{content:'⌄';font-size:18px;color:var(--green)}
+.filter-dropdown[open] summary{border-color:var(--green);box-shadow:0 0 0 3px #196b5114}
+.filter-dropdown summary:focus-visible{outline:2px solid var(--green);outline-offset:3px}
+.filter-dropdown summary[aria-disabled=true]{background:#f4f6f3;color:var(--muted);cursor:default}
+.filter-menu{position:absolute;top:calc(100% + 7px);left:0;right:0;z-index:20;background:#fff;border:1px solid var(--line);border-radius:10px;padding:6px;box-shadow:0 12px 28px #223a3524;max-height:270px;overflow-y:auto}
+.filter-menu .filter-choice{display:flex;align-items:center;gap:10px;padding:10px 9px;margin:0;border-radius:6px;cursor:pointer;font-size:13px;font-weight:400;color:var(--ink)}
+.filter-choice:hover{background:#edf4ee}
+.filter-menu .filter-choice input{width:16px;height:16px;min-height:0;margin:0;padding:0;accent-color:var(--green);flex-shrink:0}
+.filter-all{display:block;width:100%;padding:10px 9px;text-align:left;border:0;border-bottom:1px solid var(--line);background:white;color:var(--green);font-size:12px;margin-bottom:4px}
