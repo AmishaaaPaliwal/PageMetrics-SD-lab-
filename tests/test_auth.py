@@ -9,13 +9,17 @@ from unittest.mock import patch
 import server
 
 class FakeSocket:
+    # Provide request and response buffers for the simulated socket.
     def __init__(self, raw):
         self.input = io.BytesIO(raw)
         self.output = bytearray()
+    # Expose the fake socket’s input buffer to the HTTP request parser.
     def makefile(self, *args): return self.input
+    # Capture response bytes written to the fake socket.
     def sendall(self, data): self.output.extend(data)
 
 class AuthTests(unittest.TestCase):
+    # Create an isolated test database and mocked mail delivery before each test.
     def setUp(self):
         self.domain_patch=patch.dict(server.os.environ,{'PAGEMETRICS_EMAIL_DOMAINS':'example.edu','PAGEMETRICS_OTP_DELIVERY':'gmail','PAGEMETRICS_REQUIRE_OTP':'1'})
         self.domain_patch.start()
@@ -29,6 +33,7 @@ class AuthTests(unittest.TestCase):
         server.DB_PATH = Path(self.temp.name) / 'test.sqlite3'
         server.initialize()
         self.admin = server.register(self.data('administrator'), bootstrap=True)
+    # Regression check: demo login requires approval but skips email.
     def test_demo_login_requires_approval_but_skips_email(self):
         with patch.dict(server.os.environ, {'PAGEMETRICS_REQUIRE_OTP': '0'}):
             data = self.data('librarian')
@@ -43,6 +48,7 @@ class AuthTests(unittest.TestCase):
         with self.assertRaisesRegex(server.APIError, "session has expired"):
             server.session(token)
 
+    # Regression check: terminal registration and reset.
     def test_terminal_registration_and_reset(self):
         data = self.data('librarian')
         with patch.dict(server.os.environ, {'PAGEMETRICS_OTP_DELIVERY':'terminal'}), patch('builtins.print') as output:
@@ -69,6 +75,7 @@ class AuthTests(unittest.TestCase):
         with self.assertRaises(server.APIError):
             server.login(reset)
 
+    # Regression check: recovery rotates key and revokes sessions.
     def test_recovery_rotates_key_and_revokes_sessions(self):
         data = self.data('librarian')
         account = server.register(data)
@@ -87,21 +94,26 @@ class AuthTests(unittest.TestCase):
                 action()
         self.assertEqual(server.login(payload)[2]['id'], account['id'])
 
+    # Restore patched settings and remove the isolated test database after each test.
     def tearDown(self):
         self.domain_patch.stop()
         self.mail_patch.stop()
         server.DB_PATH = self.original_path
         self.temp.cleanup()
+    # Build a valid staff registration payload for test scenarios.
     def data(self, role='faculty', email=None):
         return {'name':role.title(), 'email':email or f'{role}@example.edu', 'password':'long-test-password-123', 'role':role, 'subject':'Computer Science'}
+    # Register, verify and approve a test account, then create its session.
     def active(self, role):
         user = server.register(self.data(role))
         self.verify(self.data(role))
         server.review_user(self.admin, {'id':user['id'], 'action':'approve', 'identityVerified':True})
         return server.login(self.data(role))
+    # Complete verification using the code captured by the mocked mail transport.
     def verify(self,data):
         server.request_email_code(data)
         return server.verify_email_code({**data,'code':self.mailbox[data['email'].lower()]})
+    # Exercise the HTTP handler using an in-memory request and parse its response.
     def http(self, path, method='GET', body=None, token='', csrf='', origin=None, custom=True):
         payload = json.dumps(body).encode() if body is not None else b''
         headers = [f'{method} {path} HTTP/1.1', 'Host: 127.0.0.1:5173', 'Connection: close']
@@ -117,12 +129,14 @@ class AuthTests(unittest.TestCase):
         header, content = bytes(sock.output).split(b'\r\n\r\n',1)
         return int(header.split()[1]), header.decode(), json.loads(content) if content.startswith(b'{') else content
 
+    # Regression check: registration does not grant staff privileges.
     def test_registration_does_not_grant_staff_privileges(self):
         for role in ['librarian','faculty','administrator','management']:
             user=server.register(self.data(role,role+'2@example.edu'))
             self.assertEqual(user['status'],'pending')
             with self.assertRaises(server.APIError) as e: server.login(self.data(role,role+'2@example.edu'))
             self.assertEqual(e.exception.status,403)
+    # Regression check: staff login and password storage.
     def test_staff_login_and_password_storage(self):
         token,csrf,user=self.active('faculty')
         self.assertEqual(server.session(token)['role'],'faculty')
@@ -131,14 +145,17 @@ class AuthTests(unittest.TestCase):
             row=db.execute('SELECT password_hash FROM users WHERE id=?',(user['id'],)).fetchone()
         self.assertNotIn(self.data()['password'],row['password_hash'])
         self.assertTrue(csrf)
+    # Regression check: cannot bootstrap second administrator.
     def test_cannot_bootstrap_second_administrator(self):
         with self.assertRaises(server.APIError): server.register(self.data('administrator','other@example.edu'),bootstrap=True)
+    # Regression check: case insensitive duplicate and invalid registration.
     def test_case_insensitive_duplicate_and_invalid_registration(self):
         server.register(self.data())
         with self.assertRaises(server.APIError): server.register(self.data(email='FACULTY@EXAMPLE.EDU'))
         for field,value in [('role','superuser'),('password','short'),('email','invalid')]:
             data=self.data(email='new@example.edu'); data[field]=value
             with self.assertRaises(server.APIError): server.register(data)
+    # Regression check: approval is admin only and pending only.
     def test_approval_is_admin_only_and_pending_only(self):
         _,_,student=self.active('faculty')
         pending=server.register(self.data('librarian'))
@@ -147,26 +164,31 @@ class AuthTests(unittest.TestCase):
         server.review_user(self.admin,{'id':pending['id'],'action':'approve','identityVerified':True})
         self.assertEqual(server.login(self.data('librarian'))[2]['status'],'active')
         with self.assertRaises(server.APIError): server.review_user(self.admin,{'id':pending['id'],'action':'reject'})
+    # Regression check: rejected account cannot login.
     def test_rejected_account_cannot_login(self):
         pending=server.register(self.data('faculty'))
         server.review_user(self.admin,{'id':pending['id'],'action':'reject'})
         with self.assertRaises(server.APIError): server.login(self.data('faculty'))
+    # Regression check: faculty data is scoped on server.
     def test_faculty_data_is_scoped_on_server(self):
         token,_,_=self.active('faculty')
         records=server.get_records(server.session(token))['records']
         self.assertTrue(records)
         self.assertEqual({r['subject'] for r in records},{'Computer Science'})
+    # Regression check: unauthorized api access and mutations.
     def test_unauthorized_api_access_and_mutations(self):
         self.assertEqual(self.http('/api/records')[0],401)
         token,csrf,_=self.active('faculty')
         for path,body in [('/api/import',{'csv':'bad'}),('/api/restore',{}),('/api/users/review',{'id':1,'action':'approve','identityVerified':True})]:
             self.assertEqual(self.http(path,'POST',body,token,csrf)[0],403)
         self.assertEqual(self.http('/api/users',token=token)[0],403)
+    # Regression check: csrf and cross origin protection.
     def test_csrf_and_cross_origin_protection(self):
         token,csrf,_=server.login(self.data('administrator'))
         self.assertEqual(self.http('/api/restore','POST',{},token)[0],403)
         self.assertEqual(self.http('/api/restore','POST',{},token,csrf,origin='https://evil.example')[0],403)
         self.assertEqual(self.http('/api/login','POST',self.data('administrator'),custom=False)[0],415)
+    # Regression check: login cookie logout and session expiry.
     def test_login_cookie_logout_and_session_expiry(self):
         code,headers,data=self.http('/api/login','POST',self.data('administrator'))
         self.assertEqual(code,200)
@@ -178,12 +200,14 @@ class AuthTests(unittest.TestCase):
         token,_,_=server.login(self.data('administrator'))
         with patch('server.time.time',return_value=time.time()+server.SESSION_SECONDS+1):
             with self.assertRaises(server.APIError): server.session(token)
+    # Regression check: login throttling.
     def test_login_throttling(self):
         data=self.data('administrator');data['password']='incorrect-password-123'
         for _ in range(10):
             with self.assertRaises(server.APIError):server.login(data)
         with self.assertRaises(server.APIError) as error:server.login(data)
         self.assertEqual(error.exception.status,429)
+    # Regression check: librarian import validation transaction and shared data.
     def test_librarian_import_validation_transaction_and_shared_data(self):
         _,_,librarian=self.active('librarian')
         output=io.StringIO(); writer=server.csv.DictWriter(output,fieldnames=server.FIELDS);writer.writeheader()
@@ -196,6 +220,7 @@ class AuthTests(unittest.TestCase):
         with patch('server.connect',side_effect=server.sqlite3.OperationalError('disk full')):
             with self.assertRaises(server.sqlite3.OperationalError):server.import_csv(output.getvalue(),librarian)
         self.assertEqual(server.get_records(librarian),before)
+    # Regression check: rbac endpoint matrix for all roles.
     def test_rbac_endpoint_matrix_for_all_roles(self):
         expected = {
             'faculty': (200,200,403),
@@ -214,6 +239,7 @@ class AuthTests(unittest.TestCase):
                 self.assertEqual(code,200)
                 self.assertEqual(set(me['user']['permissions']),server.PERMISSIONS[role])
 
+    # Regression check: management report is aggregate and matches dataset.
     def test_management_report_is_aggregate_and_matches_dataset(self):
         _,_,user=self.active('management')
         report=server.get_report(user)
@@ -234,6 +260,7 @@ class AuthTests(unittest.TestCase):
         self.assertIsNone(empty['onTimeRate'])
         self.assertIsNone(empty['dateFrom'])
 
+    # Regression check: user supplied permissions do not authorize requests.
     def test_user_supplied_permissions_do_not_authorize_requests(self):
         data=self.data('faculty');data['permissions']=['import','approve_accounts']
         user=server.register(data)
@@ -241,6 +268,7 @@ class AuthTests(unittest.TestCase):
         with self.assertRaises(server.APIError):server.import_csv('bad',user)
         with self.assertRaises(server.APIError):server.user_list(user)
 
+    # Regression check: students blocked in registration login and old sessions.
     def test_students_blocked_in_registration_login_and_old_sessions(self):
         with self.assertRaises(server.APIError):server.register(self.data('student'))
         with server.connect() as db:
@@ -254,6 +282,7 @@ class AuthTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT status FROM users WHERE id=?',(uid,)).fetchone()['status'],'inactive')
             self.assertEqual(db.execute('SELECT COUNT(*) FROM sessions WHERE user_id=?',(uid,)).fetchone()[0],0)
 
+    # Regression check: report filters comparisons and faculty scope.
     def test_report_filters_comparisons_and_faculty_scope(self):
         from reporting import filter_rows
         _,_,faculty=self.active('faculty')
@@ -270,6 +299,7 @@ class AuthTests(unittest.TestCase):
         for bad in [{'start':'2026-01-01'},{'start':'2026-12-01','end':'2026-01-01'},{'grouping':'INVALID'}]:
             with self.assertRaises(server.APIError):server.get_report(self.admin,bad)
 
+    # Regression check: audit and import state history.
     def test_audit_and_import_state_history(self):
         _,_,librarian=self.active('librarian')
         output=io.StringIO();writer=server.csv.DictWriter(output,fieldnames=server.FIELDS);writer.writeheader();writer.writerows(server.sample_data()[:3])
@@ -291,6 +321,7 @@ class AuthTests(unittest.TestCase):
         self.assertNotIn('long-test-password',serialized)
         with self.assertRaises(server.APIError):server.audit_history(librarian)
 
+    # Regression check: approval requires manual verification and domain policy.
     def test_approval_requires_manual_verification_and_domain_policy(self):
         pending=server.register(self.data('faculty'))
         with self.assertRaises(server.APIError):server.review_user(self.admin,{'id':pending['id'],'action':'approve'})
@@ -298,6 +329,7 @@ class AuthTests(unittest.TestCase):
             with self.assertRaises(server.APIError):server.register(self.data('management','person@outside.edu'))
             self.assertEqual(server.register(self.data('management','person@institution.edu'))['status'],'pending')
 
+    # Regression check: lnmiit default domain and lookalike rejection.
     def test_lnmiit_default_domain_and_lookalike_rejection(self):
         with patch.dict(server.os.environ,{},clear=True):
             accepted=server.register(self.data('faculty','Teacher@LNMIIT.AC.IN'))
@@ -305,6 +337,7 @@ class AuthTests(unittest.TestCase):
             for email in ['user@gmail.com','user@lnmiit.ac.in.evil.com','user@fake-lnmiit.ac.in']:
                 with self.assertRaises(server.APIError):server.register(self.data('faculty',email))
 
+    # Regression check: supplied circulation file.
     def test_supplied_circulation_file(self):
         path=server.ROOT/'samples'/'pagemetrics-circulation-sample.csv'
         rows,errors=server.validate_import(path.read_text())
@@ -313,6 +346,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual({r['format'] for r in rows},{'Print','E-book','Journal','Audio','Media'})
         self.assertTrue(all(r['anonymizedReaderId'].startswith('anon-') for r in rows))
 
+    # Regression check: email otp required before approval and login.
     def test_email_otp_required_before_approval_and_login(self):
         data=self.data('librarian');user=server.register(data)
         with self.assertRaises(server.APIError) as error:server.login(data)
@@ -331,6 +365,7 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(server.login(data)[2]['email_verified'])
         self.assertNotIn(code,json.dumps(server.audit_history(self.admin)))
 
+    # Regression check: otp expiry attempt limit resend and delivery failure.
     def test_otp_expiry_attempt_limit_resend_and_delivery_failure(self):
         data=self.data('librarian');server.register(data)
         with patch('server.send_verification_code',side_effect=server.DeliveryError('Email delivery is not configured.')):
@@ -353,6 +388,7 @@ class AuthTests(unittest.TestCase):
         with patch('server.time.time',return_value=now+662):
             with self.assertRaises(server.APIError):server.verify_email_code({**data,'code':wrong})
 
+    # Regression check: otp is account bound and hourly limited.
     def test_otp_is_account_bound_and_hourly_limited(self):
         data=self.data('librarian');server.register(data)
         other=self.data('faculty');server.register(other)
@@ -366,6 +402,7 @@ class AuthTests(unittest.TestCase):
             with self.assertRaises(server.APIError) as error:server.request_email_code(data)
             self.assertEqual(error.exception.status,429)
 
+    # Regression check: gmail transport uses tls and does not leak errors.
     def test_gmail_transport_uses_tls_and_does_not_leak_errors(self):
         import mailer
         with patch.dict(server.os.environ,{'PAGEMETRICS_GMAIL_ADDRESS':'sender@gmail.com','PAGEMETRICS_GMAIL_APP_PASSWORD':'abcd efgh ijkl mnop'}):
@@ -382,6 +419,7 @@ class AuthTests(unittest.TestCase):
                 with self.assertRaises(mailer.DeliveryError) as error:mailer.send_verification_code('staff@lnmiit.ac.in','123456')
                 self.assertNotIn('secret-password',str(error.exception))
 
+    # Regression check: database is not served.
     def test_database_is_not_served(self):
         self.assertEqual(self.http('/data/pagemetrics.sqlite3')[0],404)
         self.assertEqual(self.http('/server.py')[0],404)

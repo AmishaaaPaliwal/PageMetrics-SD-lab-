@@ -3,6 +3,7 @@ export let account = null;
 export const roleLabels = {librarian:'Librarian',faculty:'Faculty / department head',administrator:'Library administrator',management:'University / institute management'};
 export const can = permission => account?.permissions?.includes(permission) === true;
 const $ = selector => document.querySelector(selector);
+// Send a same-origin API request, include CSRF protection on writes, and expose server errors to the UI.
 export async function api(path, body) {
   const response = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
@@ -19,6 +20,7 @@ export async function api(path, body) {
   }
   return result;
 }
+// Clear account state and dashboard data, then show the sign-in form.
 function showAuth(message = '') {
   document.dispatchEvent(new CustomEvent('pagemetrics:logout'));
   account = null;
@@ -30,6 +32,7 @@ function showAuth(message = '') {
 }
 let verificationCredentials=null;
 let registering = location.pathname === '/register';
+// Switch registration/sign-in labels and required fields; the recovery button is intentionally hidden.
 function authMode() {
   $('#confirm-label').hidden = !registering;
   $('#auth-confirm').disabled = !registering;
@@ -50,6 +53,7 @@ function authMode() {
   $('#auth-message').textContent = '';
   facultyField();
 }
+// Require a subject only when the selected registration role is faculty.
 function facultyField() {
   const faculty = registering && $('#register-role').value === 'faculty';
   $('#faculty-field').hidden = !faculty;
@@ -57,6 +61,7 @@ function facultyField() {
   $('#register-subject').disabled = !faculty;
   $('#approval-note').hidden = !registering;
 }
+// Store the authenticated account and show navigation matching its server-provided permissions.
 function enter(result) {
   account = result.user;
   csrf = result.csrf;
@@ -77,8 +82,11 @@ function enter(result) {
   $('#permission-note').textContent = ({faculty:`Subject access: ${account.subject}. Use subject trends to guide resource requests.`,librarian:'Analyze borrowing trends and plan collections. Only librarians can import circulation data.',administrator:'Explore all library filters, view reports, and approve verified staff accounts.',management:'Read-only aggregate reports on library usage and resource utilization.',student:'Students benefit from collection improvements. Analytics access is reserved for authorized staff.'})[account.role];
   document.dispatchEvent(new CustomEvent('pagemetrics:login'));
 }
+// Switch between existing-account sign-in and new-account registration.
 $('#auth-toggle').onclick = () => { registering = !registering; authMode(); };
+// Update the subject field when the chosen role changes.
 $('#register-role').onchange = facultyField;
+// Submit registration or login; registration requires matching password fields.
 $('#auth-form').onsubmit = async event => {
   event.preventDefault();
   const button = $('#auth-submit');
@@ -109,17 +117,20 @@ $('#auth-form').onsubmit = async event => {
   } catch(error) { if(error.code==='EMAIL_VERIFICATION_REQUIRED')await showVerification(Object.fromEntries(new FormData(event.target)));else $('#auth-message').textContent = error.message; }
   finally { button.disabled = false; }
 };
+// End the server session and clear the authenticated interface.
 $('#logout').onclick = async () => {
   try {
     await api('/api/logout',{});
     showAuth('You have signed out.');
   } catch(error) { $('#message').textContent = error.message; }
 };
+// Initialize form state and attempt to restore an existing session from the server cookie.
 export async function initializeAuth() {
   authMode();
   try { enter(await api('/api/me')); }
   catch(error) { if (!error.message.includes('Sign in to continue')) $('#auth-message').textContent = error.message; }
 }
+// Build the administrator review list and approval actions using safe DOM text.
 export async function renderAccounts() {
   const panel = $('#account-list');
   panel.textContent = 'Loading accounts…';
@@ -167,6 +178,7 @@ export async function renderAccounts() {
   } catch(error) { panel.textContent=error.message; }
 }
 
+// Keep credentials briefly in memory and open the registration-code panel.
 async function showVerification(data){
  $('#forgot').hidden=true;
  verificationCredentials={email:data.email,password:data.password};
@@ -174,6 +186,7 @@ async function showVerification(data){
  $('#auth-title').textContent='Verify your account';$('#auth-description').textContent='Enter the registration code for '+data.email+'.';
  $('#otp-code').value='';$('#otp-message').textContent='';await sendCode();
 }
+// Request a new registration code and display delivery or cooldown feedback.
 async function sendCode(){
  if(!verificationCredentials)return;
  $('#otp-resend').disabled=true;
@@ -181,21 +194,26 @@ async function sendCode(){
  catch(error){$('#otp-message').textContent=error.message;}
  finally{$('#otp-resend').disabled=false;}
 }
+// Submit the six-digit registration code and return to sign-in on success.
 $('#otp-form').onsubmit=async event=>{
  event.preventDefault();if(!verificationCredentials)return;$('#otp-verify').disabled=true;
  try{const result=await api('/api/verify-email',{...verificationCredentials,code:$('#otp-code').value});registering=false;authMode();$('#auth-message').textContent=result.message;}
  catch(error){$('#otp-message').textContent=error.message;}
  finally{$('#otp-verify').disabled=false;}
 };
+// Allow the user to request a fresh registration code.
 $('#otp-resend').onclick=sendCode;
+// Exit verification and return to the standard sign-in screen.
 $('#otp-back').onclick=()=>{registering=false;authMode();};
 
+// Hide the standard account controls while a recovery step is displayed.
 function hideAuthControls() {
   for (const selector of ['#auth-form', '#forgot', '#auth-toggle', '#recovery-form']) {
     $(selector).hidden = true;
   }
 }
 
+// Display the private recovery key until the user confirms saving it, then clear it from the page.
 function displayRecoveryKey(key, next) {
   hideAuthControls();
   $('#auth-title').textContent = 'Save your recovery key';
@@ -210,6 +228,7 @@ function displayRecoveryKey(key, next) {
   };
 }
 
+// Open password recovery and prefill the email from the sign-in form.
 $('#forgot').onclick = () => {
   hideAuthControls();
   const form = $('#recovery-form');
@@ -223,6 +242,7 @@ $('#forgot').onclick = () => {
   form.hidden = false;
   form.elements.email.focus();
 };
+// Request a demo reset code and show where the user can retrieve it.
 $('#request-reset').onclick = async event => {
   const button = event.currentTarget;
   const form = $('#recovery-form');
@@ -237,7 +257,9 @@ $('#request-reset').onclick = async event => {
   } catch (error) { $('#reset-message').textContent = error.message; }
   finally { button.disabled = false; }
 };
+// Clear recovery inputs and return to sign-in.
 $('#reset-back').onclick = () => { $('#recovery-form').reset(); authMode(); };
+// Require matching new passwords, submit the reset and clear the sensitive form values.
 $('#recovery-form').onsubmit = async event => {
   event.preventDefault();
   const form = event.currentTarget;

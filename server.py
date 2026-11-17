@@ -23,6 +23,7 @@ from reporting import validate_criteria, filter_rows, aggregate
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / 'data' / 'pagemetrics.sqlite3'
+# The server owns these capabilities; browser-supplied permissions never grant access.
 PERMISSIONS = {
     'faculty': {'explore', 'reports'},
     'librarian': {'explore', 'import', 'reports', 'import_history'},
@@ -31,20 +32,25 @@ PERMISSIONS = {
 }
 ROLES = set(PERMISSIONS)
 SUBJECTS = ['Computer Science', 'Literature', 'Engineering', 'Mathematics', 'Natural Sciences', 'History']
+# CSV allowlist: extra columns are rejected to reduce accidental personal-data imports.
 FIELDS = ['circulationId', 'checkoutDate', 'returnDate', 'returnStatus', 'resourceId', 'title', 'subject', 'deweyClass', 'format', 'anonymizedReaderId', 'userSegment']
 STATUSES = {'NOT_RETURNED', 'RETURNED_ON_TIME', 'RETURNED_LATE', 'UNKNOWN'}
+# Sessions last eight hours before a fresh sign-in is required.
 SESSION_SECONDS = 8 * 60 * 60
 
 class APIError(Exception):
+    # Initialize the API error fields or the HTTP handler’s static-file directory.
     def __init__(self, message, status=400, code=None):
         self.status = status
         self.code = code
         super().__init__(message)
 
+# Open SQLite with foreign keys enabled; commit successful work and always close the connection.
 @contextmanager
 def connect():
     db = sqlite3.connect(DB_PATH, timeout=10)
     db.row_factory = sqlite3.Row
+    # SQLite must enforce links between users, sessions, reset codes and import jobs.
     db.execute('PRAGMA foreign_keys=ON')
     try:
         with db:
@@ -52,6 +58,7 @@ def connect():
     finally:
         db.close()
 
+# Create missing database tables and migrate existing accounts without discarding their data.
 def initialize():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as db:
@@ -100,22 +107,27 @@ def initialize():
         # Retire legacy student accounts without deleting their history.
         db.execute("UPDATE users SET status='inactive' WHERE role='student'")
         db.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE role='student')")
+    # Limit database-file access to the local operating-system account.
     os.chmod(DB_PATH, 0o600)
 
+# Record the actor, outcome and safe event details for administrator review.
 def audit(db, user, event, outcome='SUCCESS', details=None):
     db.execute('INSERT INTO audit_events(occurred_at,actor_id,actor_role,event,outcome,details) VALUES(?,?,?,?,?,?)',
                (int(time.time()), user['id'] if user else None, user['role'] if user else 'anonymous', event, outcome, json.dumps(details or {})))
 
+# Require audit permission and return a bounded page of recent events.
 def audit_history(user, offset=0):
     require_permission(user, 'audit')
     with connect() as db:
         rows = db.execute('SELECT * FROM audit_events ORDER BY id DESC LIMIT 100 OFFSET ?', (offset,)).fetchall()
     return {'events': [dict(r) for r in rows], 'nextOffset': offset+100 if len(rows)==100 else None}
 
+# Append an import transition and update the job’s current state together.
 def import_state(db, job_id, state):
     db.execute('UPDATE import_jobs SET state=? WHERE id=?', (state, job_id))
     db.execute('INSERT INTO import_states(job_id,state,occurred_at) VALUES(?,?,?)', (job_id,state,int(time.time())))
 
+# Return recent import jobs with their ordered state transitions.
 def import_history(user):
     require_permission(user, 'import_history')
     with connect() as db:
@@ -127,22 +139,26 @@ def import_history(user):
             jobs.append(item)
     return {'jobs': jobs}
 
+# Store a random salt and scrypt-derived password hash, rather than the entered password.
 def password_hash(password):
     salt = secrets.token_hex(16)
     value = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()
     return salt + ':' + value
 
+# Recompute the stored scrypt hash and compare it using a timing-resistant comparison.
 def password_matches(password, encoded):
     salt, expected = encoded.split(':')
     actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()
     return hmac.compare_digest(actual, expected)
 
+# Accept a bounded string from JSON and remove surrounding whitespace.
 def clean_text(data, key, limit=150):
     value = data.get(key, '')
     if not isinstance(value, str) or len(value) > limit:
         raise APIError(f'Invalid {key}.')
     return value.strip()
 
+# Normalize the email and enforce the shared password-length requirements.
 def credentials(data):
     email = clean_text(data, 'email', 254).lower()
     password = data.get('password', '')
@@ -152,24 +168,29 @@ def credentials(data):
         raise APIError('Use a password between 12 and 128 characters.')
     return email, password
 
+# Read the environment switch controlling verification before sign-in.
 def requires_email_code():
     return os.environ.get('PAGEMETRICS_REQUIRE_OTP', '1') == '1'
 
 
+# Select terminal delivery for a trusted local demonstration; Gmail mode uses SMTP.
 def terminal_demo():
     return os.environ.get('PAGEMETRICS_OTP_DELIVERY', 'terminal') == 'terminal'
 
 
+# Decide whether verification is still required; demo verification only counts in terminal mode.
 def awaiting_email(row):
     return requires_email_code() and not (row['email_verified'] or (terminal_demo() and row['demo_verified']))
 
 
+# Build the browser-safe account response with role permissions and verification state.
 def public_user(row):
     result = {k: row[k] for k in ('id', 'name', 'email', 'role', 'subject', 'status', 'email_verified')}
     result['awaitingEmailVerification'] = awaiting_email(row)
     result['permissions'] = sorted(PERMISSIONS.get(row['role'], set()))
     return result
 
+# Generate a private recovery key and store only its SHA-256 digest.
 def issue_recovery_key(db, user_id):
     key = secrets.token_urlsafe(24)
     digest = hashlib.sha256(key.encode()).hexdigest()
@@ -177,30 +198,37 @@ def issue_recovery_key(db, user_id):
     return key
 
 
+# Print a demo reset code for an existing account, with a resend cooldown and generic response.
 def request_reset_code(data):
     if not terminal_demo():
         return {'message': 'Enter your saved recovery key.', 'useKey': True}
     email = clean_text(data, 'email', 254).lower()
+    # Use Unix seconds for expiry and cooldown comparisons.
     now = int(time.time())
     with connect() as db:
+        # Reserve the write transaction before reading state that this operation may change.
         db.execute('BEGIN IMMEDIATE')
         user = db.execute('SELECT id FROM users WHERE email=?', (email,)).fetchone()
         if user:
             previous = db.execute('SELECT issued FROM reset_codes WHERE user_id=?', (user['id'],)).fetchone()
             if not previous or now - previous['issued'] >= 60:
+                # Generate six unpredictable decimal digits for this reset request.
                 code = f'{secrets.randbelow(1000000):06d}'
                 db.execute('INSERT OR REPLACE INTO reset_codes VALUES(?,?,?,0)',
                            (user['id'], password_hash(code), now))
+                # Demo delivery prints the code only in the local server terminal.
                 print(f'[DEMO] Password reset for {email}: {code}', flush=True)
     return {'message': 'For a registered address, check the server terminal for the reset code. Codes expire in 10 minutes. Request another after 60 seconds.'}
 
 
+# Validate the reset code or recovery key, replace the password, and revoke prior sessions atomically.
 def reset_password(data):
     email, password = credentials(data)
     if password != data.get('confirmPassword'):
         raise APIError('The passwords do not match.')
 
     with connect() as db:
+        # Reserve the write transaction before reading state that this operation may change.
         db.execute('BEGIN IMMEDIATE')
         if 'code' in data:
             code = clean_text(data, 'code', 6)
@@ -229,6 +257,7 @@ def reset_password(data):
     return {} if 'code' in data else {'recoveryKey': replacement}
 
 
+# Validate staff registration and create a pending account; trusted bootstrap can create the first admin.
 def register(data, bootstrap=False):
     email, password = credentials(data)
     name = clean_text(data, 'name', 100)
@@ -246,6 +275,7 @@ def register(data, bootstrap=False):
     status = 'active' if bootstrap else 'pending'
     with connect() as db:
         # Serialize first-admin bootstrap with concurrent processes.
+        # Reserve the write transaction before reading state that this operation may change.
         db.execute('BEGIN IMMEDIATE')
         if bootstrap and db.execute("SELECT 1 FROM users WHERE role='administrator' AND status='active'").fetchone():
             raise APIError('An active administrator already exists.')
@@ -261,8 +291,10 @@ def register(data, bootstrap=False):
         audit(db,result,'ACCOUNT_CREATED',details={'status':status})
         return result
 
+# Check credentials and persistent account/IP attempt limits before returning the database user.
 def authenticate(data, remote='local'):
     email, password = credentials(data)
+    # Use Unix seconds for expiry and cooldown comparisons.
     now = int(time.time())
     # Both account and source limits survive a server restart.
     keys = ['account:' + email, 'ip:' + remote]
@@ -273,6 +305,7 @@ def authenticate(data, remote='local'):
                 raise APIError('Too many sign-in attempts. Try again in 15 minutes.', 429)
         user = db.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
         matched = password_matches(password, user['password_hash'] if user else DUMMY_HASH)
+        # Do not reveal whether the email or password caused authentication to fail.
         if not user or not matched:
             for key in keys:
                 db.execute('INSERT INTO login_attempts VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET failures=CASE WHEN reset_at<=? THEN 1 ELSE failures+1 END, reset_at=CASE WHEN reset_at<=? THEN ? ELSE reset_at END', (key, now+900, now, now, now+900))
@@ -287,6 +320,7 @@ def authenticate(data, remote='local'):
         db.execute('DELETE FROM login_attempts WHERE key=?', (keys[0],))
         return user
 
+# Require an eligible verified account, then create a time-limited session and CSRF token.
 def login(data, remote='local'):
     user=authenticate(data,remote)
     if awaiting_email(user):
@@ -296,12 +330,14 @@ def login(data, remote='local'):
         raise APIError('Your staff account is awaiting approval.',403)
     now=int(time.time())
     with connect() as db:
+        # Use separate random values for the session cookie and CSRF request protection.
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         db.execute('DELETE FROM sessions WHERE expires_at<=?', (now,))
         db.execute('INSERT INTO sessions VALUES(?,?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), user['id'], csrf, now + SESSION_SECONDS))
         audit(db,user,'LOGIN')
     return token, csrf, public_user(user)
 
+# Issue a registration code after checking the password, domain, resend cooldown and send limits.
 def request_email_code(data, remote='local'):
     user=authenticate(data,remote)
     if user['email_verified']: raise APIError('This email is already verified.')
@@ -310,6 +346,7 @@ def request_email_code(data, remote='local'):
         raise APIError('This account does not use an approved institutional email domain.',403)
     now=int(time.time())
     with connect() as db:
+        # Reserve the write transaction before reading state that this operation may change.
         db.execute('BEGIN IMMEDIATE')
         old=db.execute('SELECT * FROM email_verifications WHERE user_id=?',(user['id'],)).fetchone()
         if old and now-old['sent_at']<60: raise APIError('Wait 60 seconds before requesting another code.',429)
@@ -333,12 +370,14 @@ def request_email_code(data, remote='local'):
         audit(db,user,'EMAIL_CODE_SENT')
     return {'message':('Check the server terminal for your registration code.' if terminal_demo() else 'Verification code sent.') + ' It expires in 10 minutes.','resendAfter':60}
 
+# Check expiry and attempt limits, consume the code, and record verification without approving the role.
 def verify_email_code(data, remote='local'):
     user=authenticate(data,remote)
     code=clean_text(data,'code',6)
     if not re.fullmatch(r'[0-9]{6}',code): raise APIError('Enter the six-digit verification code.')
     now=int(time.time())
     with connect() as db:
+        # Reserve the write transaction before reading state that this operation may change.
         db.execute('BEGIN IMMEDIATE')
         record=db.execute('SELECT * FROM email_verifications WHERE user_id=?',(user['id'],)).fetchone()
         if user['email_verified'] or not record or record['expires_at']<=now:
@@ -356,6 +395,7 @@ def verify_email_code(data, remote='local'):
     return {'message':'Code verified. Your staff role still requires administrator approval.' if user['status']=='pending' else 'Email verified. You can now sign in.'}
 
 
+# Resolve a hashed session token to an active account and reject expired or ineligible sessions.
 def session(token):
     if not token:
         raise APIError('Sign in to continue.', 401)
@@ -366,14 +406,17 @@ def session(token):
         raise APIError('Your session has expired. Please sign in again.', 401)
     return row
 
+# Reject callers whose stored role is outside the permitted role set.
 def require_role(user, roles):
     if user['role'] not in roles:
         raise APIError('Your role does not have permission for this action.', 403)
 
+# Enforce a capability from the server-owned role-to-permission mapping.
 def require_permission(user, permission):
     if permission not in PERMISSIONS.get(user['role'], set()):
         raise APIError('Your role does not have permission for this action.', 403)
 
+# Generate deterministic fictional circulation records for the local demonstration.
 def sample_data():
     titles = ['Introduction to Algorithms', 'The Great Gatsby', 'Engineering Mechanics', 'Linear Algebra Done Right', 'A Brief History of Time', 'The Discovery of India', 'Clean Code', 'Pride and Prejudice', 'The Design of Everyday Things', 'Calculus', 'The Selfish Gene', 'Sapiens']
     rows = []
@@ -383,11 +426,13 @@ def sample_data():
         rows.append(dict(zip(FIELDS, [f'C-{i+1}', str(date), str(date+dt.timedelta(days=5+i%16)) if returned else '', ('RETURNED_LATE' if i%9 == 0 else 'RETURNED_ON_TIME') if returned else 'NOT_RETURNED', f'R-{i%12}', titles[i%12], SUBJECTS[i%6], ['005','800','620','510','500','900'][i%6], ['Print','Print','E-book','Journal','Print','Audio','E-book'][i%7], f'anon-{(i*13)%217}', ['STUDENT','STUDENT','STUDENT','FACULTY','STAFF'][i%5]])))
     return rows
 
+# Load the saved JSON circulation snapshot or fall back to fictional sample records.
 def read_dataset():
     with connect() as db:
         saved = db.execute('SELECT records FROM dataset WHERE id=1').fetchone()
     return json.loads(saved['records']) if saved else sample_data(), bool(saved)
 
+# Return raw circulation data only to authorized roles, restricting faculty to their subject.
 def get_records(user):
     require_permission(user, 'explore')
     records, imported = read_dataset()
@@ -395,6 +440,7 @@ def get_records(user):
         records = [r for r in records if r['subject'] == user['subject']]
     return {'records': records, 'imported': imported}
 
+# Build available filter choices from the data the caller is allowed to access.
 def report_options(user):
     require_permission(user, 'reports')
     records, _ = read_dataset()
@@ -403,6 +449,7 @@ def report_options(user):
     options['resourceId'] = [{'value':key,'label':title} for key,title in sorted({r['resourceId']:r['title'] for r in records}.items())]
     return {'options':options}
 
+# Apply validated filters and faculty scope before calculating aggregate report results.
 def get_report(user, criteria=None):
     require_permission(user, 'reports')
     try: criteria=validate_criteria(criteria)
@@ -417,12 +464,14 @@ def get_report(user, criteria=None):
     return result
 
 
+# Accept real calendar dates written in the exact YYYY-MM-DD format.
 def valid_date(value):
     try:
         return bool(re.fullmatch(r'\d{4}-\d{2}-\d{2}', value)) and str(dt.date.fromisoformat(value)) == value
     except (ValueError, TypeError):
         return False
 
+# Validate CSV headers and individual rows, returning accepted records and safe rejection reasons.
 def validate_import(text):
     if not isinstance(text, str) or len(text.encode()) > 5*1024*1024:
         raise APIError('CSV must be smaller than 5 MB.')
@@ -458,9 +507,11 @@ def validate_import(text):
             seen.add(r['circulationId'])
     return accepted, errors
 
+# Replace the shared dataset snapshot inside the caller’s database transaction.
 def save_records(db, accepted):
     db.execute('INSERT INTO dataset VALUES(1,?) ON CONFLICT(id) DO UPDATE SET records=excluded.records', (json.dumps(accepted),))
 
+# Track validation and processing states, save accepted rows, and retain existing data on write failure.
 def import_csv(text, user):
     require_permission(user, 'import')
     with connect() as db:
@@ -491,11 +542,13 @@ def import_csv(text, user):
         raise
 
 
+# Require account-approval permission before exposing the staff account list.
 def user_list(user):
     require_permission(user, 'approve_accounts')
     with connect() as db:
         return [public_user(row) for row in db.execute('SELECT * FROM users ORDER BY created_at DESC,id DESC')]
 
+# Approve or reject a pending account after checking administrator authority and identity confirmation.
 def review_user(user, data):
     require_permission(user, 'approve_accounts')
     target, action = data.get('id'), data.get('action')
@@ -515,9 +568,11 @@ def review_user(user, data):
 DUMMY_HASH = password_hash('constant-dummy-password-not-an-account')
 
 class Handler(SimpleHTTPRequestHandler):
+    # Initialize the API error fields or the HTTP handler’s static-file directory.
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT / 'dist'), **kwargs)
 
+    # Attach response headers that limit caching and browser content interpretation.
     def end_headers(self):
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'same-origin')
@@ -525,6 +580,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header('X-Frame-Options', 'DENY')
         super().end_headers()
 
+    # Serialize an API response, set its status and optional cookie, and write UTF-8 JSON.
     def send_json(self, value, status=200, cookie=None):
         payload = json.dumps(value).encode()
         self.send_response(status)
@@ -534,16 +590,19 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    # Read the session cookie from the incoming request.
     def token(self):
         cookie = SimpleCookie()
         try: cookie.load(self.headers.get('Cookie', ''))
         except Exception: return ''
         return cookie['pm_session'].value if 'pm_session' in cookie else ''
 
+    # Build a session cookie with lifetime and browser security attributes.
     def cookie(self, token, age=SESSION_SECONDS):
         secure = '; Secure' if os.environ.get('PAGEMETRICS_SECURE_COOKIES') == '1' else ''
         return f'pm_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={age}{secure}'
 
+    # Route read-only API requests through session authorization, or serve permitted frontend files.
     def do_GET(self):
         path = urlparse(self.path).path
         if path.startswith('/api/'):
@@ -572,13 +631,16 @@ class Handler(SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    # Reuse the server’s static response handling for header-only requests.
     def do_HEAD(self):
         if urlparse(self.path).path not in {'/', '/index.html', '/style.css', '/app.js', '/analytics.js', '/auth.js'}:
             self.send_error(404)
         else: super().do_HEAD()
 
+    # Validate request origin and JSON headers, dispatch public auth routes, then protect account mutations with CSRF.
     def do_POST(self):
         try:
+            # Only same-origin JSON requests with the application header may mutate data.
             # Custom JSON header prevents cross-origin simple requests. No CORS is enabled.
             if self.headers.get('Content-Type', '').split(';')[0] != 'application/json' or self.headers.get('X-PageMetrics') != '1':
                 raise APIError('Unsupported request.', 415)
@@ -594,6 +656,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json(request_reset_code(data)); return
             if path == '/api/reset-password':
                 self.send_json(reset_password(data)); return
+            # Public registration is allowed before a session exists; it still requires role approval.
             if path == '/api/register':
                 if 'confirmPassword' in data and data['confirmPassword'] != data.get('password'):
                     raise APIError('The passwords do not match.')
@@ -612,6 +675,7 @@ class Handler(SimpleHTTPRequestHandler):
                     db.execute('DELETE FROM sessions WHERE token_hash=?', (hashlib.sha256(self.token().encode()).hexdigest(),))
                 self.send_json({'user': user, 'csrf': csrf}, cookie=self.cookie(token))
                 return
+            # All routes below this point require a valid session.
             user = session(self.token())
             if not hmac.compare_digest(self.headers.get('X-CSRF-Token', ''), user['csrf']):
                 raise APIError('Invalid request token. Refresh and try again.', 403)
@@ -636,6 +700,7 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception: self.send_json({'error': 'The server could not complete the request. Existing data was retained.'}, 500)
 
 if __name__ == '__main__':
+    # Command-line entry point: initialize storage, run local account setup, or start HTTP serving.
     parser = argparse.ArgumentParser(description='PageMetrics local server')
     parser.add_argument('--issue-recovery-key', metavar='EMAIL', help='Issue a replacement recovery key from the trusted local terminal')
     parser.add_argument('--create-admin', action='store_true', help='Create the first administrator using terminal prompts')
@@ -660,6 +725,7 @@ if __name__ == '__main__':
             print('Administrator created. Start the server with npm start.')
         except APIError as error: raise SystemExit(str(error))
     else:
+        # Bind to this computer’s loopback address for the local project demonstration.
         httpd = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
         print(f'PageMetrics: http://127.0.0.1:{args.port}', flush=True)
         try: httpd.serve_forever()
