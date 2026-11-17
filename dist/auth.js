@@ -35,7 +35,8 @@ function authMode() {
   $('#auth-confirm').disabled = !registering;
   $('#auth-confirm').required = registering;
   $('#auth-confirm').value = '';
-  $('#forgot').hidden = registering;
+  // Temporarily hide password recovery from the sign-in screen.
+  $('#forgot').hidden = true;
   $('#recovery-form').hidden = true;
   verificationCredentials=null;$('#otp-panel').hidden=true;$('#auth-form').hidden=false;$('#auth-toggle').hidden=false;
   $('#auth-title').textContent = registering ? 'Create your account' : 'Welcome back';
