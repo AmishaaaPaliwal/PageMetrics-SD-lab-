@@ -625,7 +625,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.send_json(result)
             except APIError as error: self.send_json({'error': str(error), 'code': error.code}, error.status)
             except Exception: self.send_json({'error': 'The server could not complete the request.'}, 500)
-        elif path in {'/', '/index.html', '/login', '/register', '/style.css', '/app.js', '/analytics.js', '/auth.js'}:
+        elif path in {'/', '/index.html', '/login', '/register', '/style.css', '/app.js', '/analytics.js', '/auth.js', '/filter-dropdowns.js'}:
             if path in {'/login', '/register'}: self.path = '/index.html'
             super().do_GET()
         else:
@@ -633,7 +633,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     # Reuse the server’s static response handling for header-only requests.
     def do_HEAD(self):
-        if urlparse(self.path).path not in {'/', '/index.html', '/style.css', '/app.js', '/analytics.js', '/auth.js'}:
+        if urlparse(self.path).path not in {'/', '/index.html', '/style.css', '/app.js', '/analytics.js', '/auth.js', '/filter-dropdowns.js'}:
             self.send_error(404)
         else: super().do_HEAD()
 

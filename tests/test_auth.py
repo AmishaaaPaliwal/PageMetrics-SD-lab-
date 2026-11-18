@@ -420,6 +420,11 @@ class AuthTests(unittest.TestCase):
                 self.assertNotIn('secret-password',str(error.exception))
 
     # Regression check: database is not served.
+    def test_dropdown_module_is_served(self):
+        status, _, body = self.http('/filter-dropdowns.js')
+        self.assertEqual(status, 200)
+        self.assertIn('refreshDropdowns', str(body))
+
     def test_database_is_not_served(self):
         self.assertEqual(self.http('/data/pagemetrics.sqlite3')[0],404)
         self.assertEqual(self.http('/server.py')[0],404)

@@ -8,7 +8,7 @@
   <div class="auth-main"><div class="auth-card"><div class="eyebrow">YOUR LIBRARY WORKSPACE</div><h1 id="auth-title">Welcome back</h1><p id="auth-description">Sign in to your library workspace.</p>
 
 <!-- Sign-in and registration inputs, with confirmation enabled during registration. -->
-<form id="auth-form">
+<form method="post" onsubmit="return false" id="auth-form">
 <!-- New staff registration details; faculty additionally selects a subject. -->
 <div id="registration-fields" hidden><label>Full name<input id="register-name" name="name" autocomplete="name" maxlength="100"></label><label>Account role<select id="register-role" name="role"><option value="librarian">Librarian</option><option value="faculty">Faculty / department head</option><option value="administrator">Library administrator</option><option value="management">University / institute management</option></select></label><label id="faculty-field" hidden>Subject area<select name="subject" id="register-subject"><option value="">Select your subject</option><option>Computer Science</option><option>Literature</option><option>Engineering</option><option>Mathematics</option><option>Natural Sciences</option><option>History</option></select></label><p id="approval-note" class="notice" hidden>An administrator will review your staff role before you can sign in.</p></div>
   <label>Email address<input id="auth-email" name="email" type="email" autocomplete="username" maxlength="254" placeholder="you@lnmiit.ac.in" required></label><label>Password<input id="auth-password" name="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" placeholder="At least 12 characters" required></label><label id="confirm-label" hidden>Confirm password<input id="auth-confirm" name="confirmPassword" type="password" autocomplete="new-password" maxlength="128" disabled></label><button class="primary" id="auth-submit" type="submit">Sign in →</button><p id="auth-message" role="status" aria-live="polite"></p></form>
@@ -16,7 +16,7 @@
 <button id="forgot" hidden class="text-button" type="button">Forgot password?</button>
 
 <!-- Password-reset form submits the terminal code and matching new passwords. -->
-<form id="recovery-form" hidden>
+<form method="post" onsubmit="return false" id="recovery-form" hidden>
     <label>Email address<input name="email" type="email" autocomplete="username" required></label>
     <button id="request-reset" type="button" class="secondary">Request reset code</button>
     <label>Reset code<input id="reset-secret" name="code" autocomplete="off" required></label>
@@ -30,7 +30,7 @@
 <section id="save-key" hidden><p>Save this private recovery key in your password manager. You’ll need it if you forget your password.</p><code id="new-key"></code><p><button id="key-saved" class="primary" type="button">I saved my key. Continue</button></p></section>
 
 <!-- Registration verification inputs and resend/back controls. -->
-<section id="otp-panel" hidden><form id="otp-form"><label>Verification code<input id="otp-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" placeholder="Six-digit code" required></label><button id="otp-verify" type="submit" class="primary">Verify code</button></form><p id="otp-message" role="status" aria-live="polite"></p><button id="otp-resend" type="button" class="secondary">Resend code</button><button id="otp-back" type="button" class="text-button">Back to sign in</button></section><button id="auth-toggle" class="text-button" type="button">New to PageMetrics? Create an account</button><p class="auth-footnote">PageMetrics is for library staff, faculty, and institute management. Students benefit indirectly and do not need an account.</p></div></div>
+<section id="otp-panel" hidden><form method="post" onsubmit="return false" id="otp-form"><label>Verification code<input id="otp-code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" placeholder="Six-digit code" required></label><button id="otp-verify" type="submit" class="primary">Verify code</button></form><p id="otp-message" role="status" aria-live="polite"></p><button id="otp-resend" type="button" class="secondary">Resend code</button><button id="otp-back" type="button" class="text-button">Back to sign in</button></section><button id="auth-toggle" class="text-button" type="button">New to PageMetrics? Create an account</button><p class="auth-footnote">PageMetrics is for library staff, faculty, and institute management. Students benefit indirectly and do not need an account.</p></div></div>
 </section>
 <!-- Authenticated application shell. JavaScript reveals this after session validation. -->
 <div id="workspace-app" hidden>
