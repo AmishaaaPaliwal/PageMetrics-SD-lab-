@@ -12,12 +12,16 @@ export function refreshDropdowns(form) {
       const caption = document.createElement('span');
       caption.className = 'dropdown-caption';
       caption.textContent = title;
-      const details = document.createElement('details');
+      const details = document.createElement('div');
       details.className = 'filter-dropdown';
-      const summary = document.createElement('summary');
+      const summary = document.createElement('button');
+      summary.type = 'button';
+      summary.className = 'filter-trigger';
       summary.setAttribute('aria-label', title);
+      summary.setAttribute('aria-expanded', 'false');
       const menu = document.createElement('div');
       menu.className = 'filter-menu';
+      menu.hidden = true;
       menu.setAttribute('role', 'group');
       menu.setAttribute('aria-label', title);
       details.append(summary, menu);
@@ -27,21 +31,21 @@ export function refreshDropdowns(form) {
       control = {details, summary, menu};
       controls.set(select, control);
 
-      // Open one menu at a time and close it when keyboard focus leaves the field.
-      details.addEventListener('toggle', () => {
-        if (details.open) document.querySelectorAll('.filter-dropdown[open]').forEach(other => {
-          if (other !== details) other.open = false;
-        });
-      });
+      // Toggle panels explicitly, without native details toggle events or focusout mutations.
+      summary.onclick = () => {
+        if (select.disabled) return;
+        const shouldOpen = menu.hidden;
+        closeDropdowns();
+        menu.hidden = !shouldOpen;
+        summary.setAttribute('aria-expanded', String(shouldOpen));
+      };
       details.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
-          details.open = false;
+          closeDropdowns();
           summary.focus();
         }
       });
-      details.addEventListener('focusout', event => {
-        if (!details.contains(event.relatedTarget)) details.open = false;
-      });
+
     }
 
     const {details, summary, menu} = control;
@@ -51,9 +55,10 @@ export function refreshDropdowns(form) {
       selected.length === 1 ? selected[0].textContent : selected.length + ' selected';
     summary.title = selected.map(option => option.textContent).join(', ');
     summary.setAttribute('aria-disabled', String(select.disabled));
-    summary.onclick = event => { if (select.disabled) event.preventDefault(); };
+    summary.disabled = select.disabled;
     summary.tabIndex = select.disabled ? -1 : 0;
-    if (select.disabled) details.open = false;
+    menu.hidden = true;
+    summary.setAttribute('aria-expanded', 'false');
     menu.replaceChildren();
 
     const all = document.createElement('button');
@@ -91,9 +96,17 @@ export function refreshDropdowns(form) {
   });
 }
 
-// Clicking elsewhere dismisses a menu without changing its selections.
-document.addEventListener('pointerdown', event => {
-  document.querySelectorAll('.filter-dropdown[open]').forEach(menu => {
-    if (!menu.contains(event.target)) menu.open = false;
+// Close menus without rebuilding their focused checkbox elements.
+function closeDropdowns() {
+  document.querySelectorAll('.filter-dropdown').forEach(dropdown => {
+    dropdown.querySelector('.filter-menu').hidden = true;
+    dropdown.querySelector('.filter-trigger').setAttribute('aria-expanded', 'false');
   });
+}
+
+document.addEventListener('pointerdown', event => {
+  if (!event.target.closest('.filter-dropdown')) closeDropdowns();
+});
+document.addEventListener('focusin', event => {
+  if (!event.target.closest('.filter-dropdown')) closeDropdowns();
 });
